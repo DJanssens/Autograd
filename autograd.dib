@@ -1,0 +1,344 @@
+#!meta
+
+{"kernelInfo":{"defaultKernelName":"csharp","items":[{"aliases":[],"languageName":"csharp","name":"csharp"}]}}
+
+#!markdown
+
+# Neural Network - autograd: C# implementation
+A tiny Autograd engine -  implements backpropagation over a dynamically built DAG and a small neural network (with a PyTorch-like API). The DAG only operates over scalar values, so e.g. we chop up each neuron into all of its individual tiny adds and multiplies. However, this is enough to build up entire deep neural nets doing binary classification.
+
+Based on the idea of https://github.com/karpathy/micrograd
+
+#!csharp
+
+#r "Microsoft.DotNet.Interactive.Mermaid.dll"
+using Microsoft.DotNet.Interactive.Mermaid;
+
+#!csharp
+
+/// <summary>
+/// Represents a value in a neural network with support for automatic differentiation.
+/// </summary>
+/// <param name="data">The numerical data of the value.</param>
+/// <param name="children">The child values that this value depends on.</param>
+/// <param name="op">The operation that produced this value.</param>
+/// <param name="label">An optional label for the value.</param>
+/// <param name="gradient">The gradient of the value, used for backpropagation.</param>
+/// <param name="backward">The function to compute the gradient during backpropagation.</param>
+class Value(double data, Value[] children = null, string op = "", string label ="", double gradient = 0.0, Action backward = null) { 
+
+    public double Data { get; set; } = data;
+    public Value[] Children { get; } = children ?? Array.Empty<Value>();
+    public string Op { get; } = op;
+    public string Label { get; } = label;
+    public double Gradient { get; set; } = gradient;
+    public Action Backward { get; set; } = backward;
+
+    public override string ToString() => $"Value(data={data.ToString()})";
+
+    public static Value operator +(Value a, Value b){
+        var output =  new Value(a.Data + b.Data, new[] { a, b }, "+");
+        var backward = () => {
+            a.Gradient += output.Gradient;
+            b.Gradient += output.Gradient;
+        };
+        output.Backward = backward;
+        return output;
+    }
+
+    public static Value operator -(Value a) => a * -1;
+
+    public static Value operator -(Value a, Value b) => a + (- b);
+
+    public static Value operator *(Value a, Value b){
+        var output = new Value(a.Data * b.Data, new[] { a, b }, "*");
+        var backward = () => {
+            a.Gradient += b.Data * output.Gradient;
+            b.Gradient += a.Data * output.Gradient;
+        };
+        output.Backward = backward;
+        return output;
+    }
+
+    public static Value Pow(Value a, double b){
+        var output = new Value(Math.Pow(a.Data, b), new[] { a }, $"**{b}");
+        var backward = () => {
+            a.Gradient += b * Math.Pow(a.Data, b - 1) * output.Gradient;
+        };
+        output.Backward = backward;
+        return output;
+    }
+
+    public static Value operator /(Value a, Value b){
+        return a * Pow(b, -1);
+    }
+
+    public static implicit operator Value(double data) => new Value(data);
+
+    public static Value tanh(Value a){
+        var output = new Value(Math.Tanh(a.Data), [a], "tanh");
+        var backward = () => {
+            a.Gradient += (1 - Math.Pow(output.Data, 2)) * output.Gradient;
+        };
+        output.Backward = backward;
+        return output;
+    }
+}
+
+#!csharp
+
+/// <summary>
+/// Helper method to visualize the computation graph of a value using Mermaid.
+/// </summary>
+static void Visualize(Value value) {
+    var sb = new StringBuilder();
+    sb.AppendLine("graph TD");
+    var nodes = new HashSet<Value>();
+    GenerateMermaidGraph(value, sb, nodes);
+    var graphDefinition = sb.ToString();
+    new MermaidMarkdown(graphDefinition).Display(); // Render Mermaid chart in Polyglot Notebooks
+}
+
+private static void GenerateMermaidGraph(Value value, StringBuilder sb, HashSet<Value> visitedNodes) {
+     static string NodeId(Value value) => $"Node{value.GetHashCode()}";
+    
+    if (visitedNodes.Contains(value)) return;
+    visitedNodes.Add(value);
+
+    var valueNodeId = NodeId(value);
+    var nodeValue = (value.Label != "") ? $"{value.Label}|V={value.Data:F3}|G={value.Gradient:F3}" : $"V={value.Data:F3}|G={value.Gradient:F3}";
+    sb.AppendLine($"{valueNodeId}[\"{nodeValue}\"]:::value");
+
+    if (value.Children != null && value.Children.Any()) {
+        // Create a unique operator node
+        var opNodeId = $"op_{value.GetHashCode()}";
+        sb.AppendLine($"{opNodeId}((\"{value.Op}\")):::operator");
+
+        // Connect children to the operator node
+        foreach (var child in value.Children) {
+            var childId = NodeId(child);
+            sb.AppendLine($"{childId} --> {opNodeId}");
+            GenerateMermaidGraph(child, sb, visitedNodes);
+        }
+
+        // Connect the operator node to the current value node
+        sb.AppendLine($"{opNodeId} --> {valueNodeId}");
+    }
+}
+
+#!csharp
+
+// simple example: expression: y = x1 * w1 + x2 * w2 + b
+using static Value;
+var x1 = new Value(3.0, label:"x1");
+var x2 = new Value(5.0, label:"x2");
+var w1 = new Value(4.0, label:"w1");
+var w2 = new Value(-1.0, label:"w2");
+var b = new Value(2.0, label:"b");
+var x1w1 = x1 * w1;
+var x2w2 = x2 * w2;
+var x1w1x2w2 = x1w1 + x2w2;
+var y = x1w1x2w2 + b;
+y.Gradient = 1.0; // set outcome gradient to 1, ready for backpropagation
+
+#!csharp
+
+Visualize(y);
+
+#!csharp
+
+/// <summary>
+/// Performs the backward pass for the given value by traversing the computational graph (using DFS).
+/// </summary>
+/// <param name="y">The value from which to start the backward pass.</param>
+ static void Backward(Value y) {
+    var stack = new Stack<Value>();
+    stack.Push(y);
+    while (stack.Any()) {
+        var value = stack.Pop();
+        if (value.Backward != null) {
+            value.Backward();
+            foreach (var child in value.Children) {
+                stack.Push(child);
+            }
+        }
+    }
+}
+
+#!csharp
+
+Backward(y);
+// afterwards run Visualize(y) cell again to see changes in gradients
+
+#!csharp
+
+/// <summary>
+/// Represents a single neuron of the NN, computes the weighted sum of the inputs and applies the tanh activation function.
+/// </summary>
+class Neuron {
+    public Value[] Weights { get; }
+    public Value Bias { get; }
+    public Value Output { get; private set; }
+
+    public Neuron(int inputSize) {
+        var random = new Random();
+        Weights = new Value[inputSize];
+        for (int i = 0; i < inputSize; i++) {
+            Weights[i] = new Value(random.NextDouble(), label: $"w{i+1}"); // intialize weights randomly
+        }
+        Bias = new Value(random.NextDouble(), label: "b");
+    }
+    // forward pass, calculates the weighted sum of the inputs and applies the tanh activation function
+    public Value Forward(Value[] inputs) {
+        var weightedSum = Bias;
+        for (int i = 0; i < Weights.Length; i++) {
+            weightedSum += inputs[i] * Weights[i];
+        }
+        Output = tanh(weightedSum);
+        return Output;
+    }
+
+    public IEnumerable<Value> Parameters => Weights.Concat([Bias]);
+}
+
+/// <summary>
+/// Represents a fully connected layer of neurons in the NN
+/// eg. new Layer(2, 3) creates a layer with 3 neurons, each with 2 input weights.
+/// </summary>
+class Layer{
+    public Neuron[] Neurons { get; }
+    public Value[] Outputs { get; private set; }
+
+    public Layer(int inputSize, int outputSize) {
+        Neurons = new Neuron[outputSize];
+        for (int i = 0; i < outputSize; i++) {
+            Neurons[i] = new Neuron(inputSize);
+        }
+    }
+
+    // forward pass, calculates the output of each neuron in the layer
+    public Value[] Forward(Value[] inputs) {
+        Outputs = new Value[Neurons.Length];
+        for (int i = 0; i < Neurons.Length; i++) {
+            Outputs[i] = Neurons[i].Forward(inputs);
+        }
+        return Outputs;
+    }
+
+    public IEnumerable<Value> Parameters => Neurons.SelectMany(n => n.Parameters);
+}
+
+/// <summary>
+/// Represents a multi-layer perceptron (MLP) with a configurable number of hidden layers.
+///  eg. new MLP(2, new[] { 3, 4 }, 1) creates a MLP with 2 input nodes, 2 hidden layers with 3 and 4 nodes respectively, and 1 output node.
+/// </summary>
+class MLP {
+    public Layer[] Layers { get; }
+
+    public MLP(int inputSize, int[] hiddenSizes, int outputSize) {
+        Layers = new Layer[hiddenSizes.Length + 1];
+        Layers[0] = new Layer(inputSize, hiddenSizes[0]);
+        for (int i = 1; i < hiddenSizes.Length; i++) {
+            Layers[i] = new Layer(hiddenSizes[i - 1], hiddenSizes[i]);
+        }
+        Layers[hiddenSizes.Length] = new Layer(hiddenSizes.Last(), outputSize);
+    }
+
+    public Value[] Forward(Value[] inputs) {
+        var outputs = inputs;
+        foreach (var layer in Layers) {
+            outputs = layer.Forward(outputs);
+        }
+        return outputs;
+    }
+
+    public IEnumerable<Value> Parameters => Layers.SelectMany(l => l.Parameters);
+}
+
+#!csharp
+
+var mlp = new MLP(2, new[] { 2, 2 }, 1);
+var result = mlp.Forward(new[] { x1, x2 })[0];
+
+#!csharp
+
+Visualize(result);
+
+#!csharp
+
+result.Gradient = 1.0;
+Backward(result);
+
+#!csharp
+
+// Dataset of 3 samples - each with 2 values together with the expected y value.
+double[][] xs = [ 
+    [3.0, 2.0 ],
+    [3.1, 1.0],
+    [3.4, -5]
+];
+double[] ys = [ 1.0, 1.0, -1.0];
+
+#!csharp
+
+// we create a 2-2-1 MLP and compute the loss for the dataset - we use the squared error loss
+var mlp = new MLP(2, new[] { 2, 2 }, 1);
+List<Value> outcomes = [];
+
+foreach(var x in xs){
+    var result = mlp.Forward([new Value(x[0]), new Value(x[1])])[0];
+    outcomes.Add(result);
+}
+
+var loss = outcomes.Zip(ys, (o, y) => Pow(o - new Value(y), 2)).Aggregate((a, b) => a + b);
+
+#!csharp
+
+Visualize(loss);
+
+#!csharp
+
+loss.Gradient = 1.0;
+Backward(loss);
+
+#!csharp
+
+var parameters = mlp.Parameters; // get all parameters of the MLP - will fetch all weights and biases
+
+#!csharp
+
+// learning fase, we do # epochs, each epoch we compute the loss and update the parameters (in the opposite direction of the gradient)
+// here we hard-coded to have 20-epochs and a learning rate of 0.1
+// The loss should decrease over time
+foreach(var i in Enumerable.Range(0, 20)){
+    outcomes = [];
+    foreach(var (x, y) in xs.Zip(ys, (x, y) => (x, y))){
+        var result = mlp.Forward([new Value(x[0]), new Value(x[1])])[0];
+        outcomes.Add(result);
+        Console.WriteLine($"Predicted: {result.Data}, Actual: {y}");
+    }
+
+    loss = outcomes.Zip(ys, (o, y) => Pow(o - new Value(y), 2)).Aggregate((a, b) => a + b);
+    loss.Gradient = 1.0;
+    Backward(loss);
+
+    Console.WriteLine($"Loss: {loss.Data}");
+
+    foreach(var p in parameters){
+        p.Data -= 0.1 * p.Gradient;
+        p.Gradient = 0.0;
+    }
+}
+
+#!csharp
+
+// Predict y for new sample:
+int Sign(double value) => value > 0 ? 1 : -1;
+
+Value[] newSample1 = [new(3.0), new(1.2)];
+var prediction = mlp.Forward(newSample1)[0];
+Console.WriteLine($"Input: ({newSample1[0].Data}, {newSample1[1].Data}), Predicted: {Sign(prediction.Data)}");
+
+Value[] newSample2 = [new(3.0), new(-4.2)];
+var prediction2 = mlp.Forward(newSample2)[0];
+Console.WriteLine($"Input: ({newSample2[0].Data}, {newSample2[1].Data}), Predicted: {Sign(prediction2.Data)}");
